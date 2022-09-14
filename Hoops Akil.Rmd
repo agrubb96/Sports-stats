@@ -1,0 +1,436 @@
+---
+title: "Hoops ML"
+author: "Akil Grubb"
+date: "8/30/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+load libraries
+```{r}
+library(dplyr)
+library(data.table)
+library(tidyverse) 
+library(psych)
+library(keras) 
+library(vip) 
+library(pdp) 
+library(mltools) 
+library(caret) 
+#install_github("rstudio/tensorflow")
+library(tensorflow)
+#use_condaenv("r-tensorflow")
+library(MLmetrics)
+# read in player data & cleaning 
+library(rpart) 
+library(rattle) 
+library(keras) 
+library(ranger) 
+library(vip) 
+library(ggplot2)
+```
+
+data read in and clean
+
+```{r}
+
+player_career_info<- read_csv("Player Career Info.csv") %>% as.data.frame()
+
+player_pergame <- read_csv("Player Per Game.csv") %>% as.data.frame()
+player_pergame_clean <- player_pergame %>%
+  mutate_if(is.character, as.factor) %>%
+    mutate(seas_id = as.character(seas_id) ) 
+player_pergame_clean <- player_pergame %>%
+  dplyr::select(player, seas_id, everything() )
+ 
+player_adv <- read_csv("Advanced.csv") %>% as.data.frame() #advanced stats
+player_adv_clean <- player_adv %>%
+  mutate_if(is.character, as.factor) %>%
+    mutate(seas_id = as.character(seas_id) ) 
+player_adv_clean <- player_adv %>%
+  dplyr::select(player, seas_id, everything() )
+
+player_totals <- read_csv("Player Totals.csv") %>% as.data.frame()
+player_totals_clean <- player_totals %>%
+  mutate_if(is.character, as.factor) %>%
+    mutate(seas_id = as.character(seas_id) ) 
+player_totals_clean <- player_totals %>%
+  dplyr::select(player, seas_id, everything() )
+
+
+#merges stat data
+stats1 <- merge(player_totals_clean,player_pergame_clean,by="seas_id",no.dups = TRUE) #totals + per game
+stats1clean = stats1[,!grepl(".y$",names(stats1))]
+stats1clean = stats1clean %>% 
+  rename_at(.vars = vars(ends_with(".x")),
+            .funs = funs(sub("[.]x$", "", .)))
+
+stats2 <- merge(stats1,player_adv_clean,by="seas_id",no.dups = TRUE) #all stats
+stats2clean = stats2[,!grepl(".y$",names(stats1))]
+names(stats2clean)[names(stats2clean) == 'seas_id.x'] <- 'seas_id'
+stats2clean = stats2clean[,!grepl(".x$",names(stats2clean))]
+
+players_alltime <- merge(stats2clean,player_career_info,by="player_id",no.dups = TRUE)
+players_alltimeclean = players_alltime[,!grepl(".y$",names(players_alltime))]
+players_alltimeclean = players_alltimeclean %>% 
+  rename_at(.vars = vars(ends_with(".x")),
+            .funs = funs(sub("[.]x$", "", .)))
+
+
+#look t final data frame
+glimpse(players_alltimeclean)
+
+write.csv(players_alltimeclean, 'alltime.csv')
+```
+
+
+Neural Network look at data
+```{r}
+
+
+#look at how much data is missing
+sort(colMeans(is.na(players_alltimeclean) ), decreasing = TRUE)
+
+# too much data lost before the addition of the 3 pt line in 1979
+# I'd argue the best quality basketball comes in the modern era
+
+alltime_post1979=filter(players_alltimeclean, season >= 1979)
+sort(colMeans(is.na(alltime_post1979) ), decreasing = TRUE)
+
+#dropping birth, used to distinguish player of similar name, but will use season id & name + season to identity differences. among the best of the best there are much fewer with same names
+#dropping lg, because there was one league post 1979 after the merger
+alltime_post1979 = alltime_post1979[,!grepl("h_year$",names(alltime_post1979))]
+alltime_post1979 = alltime_post1979[,!grepl("lg$",names(alltime_post1979))]
+sort(colMeans(is.na(alltime_post1979) ), decreasing = TRUE)
+
+#dropping player id for redundancy
+alltime_post1979 = alltime_post1979[,!grepl("r_id$",names(alltime_post1979))]
+
+alltime_post1979 = alltime_post1979[,!grepl("ence$",names(alltime_post1979))]
+alltime_post1979 = alltime_post1979[,!grepl("_seas$",names(alltime_post1979))]
+
+#dropping na data
+alltime_post1979 <- alltime_post1979 %>%
+  drop_na()
+
+write.csv(alltime_post1979, 'alltime.csv')
+
+str(alltime_post1979)
+set.seed(12345) # 
+
+dt = sort(sample(nrow(alltime_post1979), nrow(alltime_post1979)*.7))
+alltime_training = alltime_post1979[dt,]
+alltime_test = alltime_post1979[-dt,]
+
+
+alltime_training <- alltime_training %>% dplyr::select(-player,-seas_id,-season)
+alltime_test <- alltime_test %>% dplyr::select(-player,-seas_id,-season)
+
+
+
+#testing and training
+
+x_alltime_training <- alltime_training %>% dplyr::select(-hof)
+y_alltime_training <- ifelse(alltime_training$hof == "Yes", 1, 0)
+x_alltime_test <- alltime_test %>% dplyr::select(-hof)
+y_alltime_test <- ifelse(alltime_test$hof == "Yes", 1, 0)
+
+alltime_preprocess <- x_alltime_training %>%
+  preProcess(method = c("center", "scale") )
+
+
+x_alltime_training <- predict(alltime_preprocess, x_alltime_training)
+x_alltime_test <- predict(alltime_preprocess, x_alltime_test)
+
+
+x_alltime_training <- x_alltime_training %>%
+  data.table() %>%
+  one_hot() %>%
+ dplyr::select(fg:pos,age:top_75) %>%
+  mutate(across(!c(fg, fga, x3p, x3pa, x2p, x2pa, ft, fta,orb,drb,trb,ast,stl,
+                   blk,tov,pf,pts,mp_per_game,fg_per_game,fga_per_game,x3p_per_game,
+                   x3pa_per_game,x2p_per_game,x2pa_per_game,ft_per_game,fta_per_game,
+                   orb_per_game,drb_per_game,trb_per_game,ast_per_game,stl_per_game,
+                   blk_per_game,tov_per_game,pf_per_game,pts_per_game,age,
+                   g,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,
+                   trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,
+                   usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,num_seasons), as.factor) )
+
+x_alltime_test <- x_alltime_test %>%
+  data.table() %>%
+  one_hot() %>%
+  dplyr::select(fg:pos,age:top_75) %>%
+  mutate(across(!c(fg, fga, x3p, x3pa, x2p, x2pa, ft, fta,orb,drb,trb,ast,stl,
+                   blk,tov,pf,pts,mp_per_game,fg_per_game,fga_per_game,x3p_per_game,
+                   x3pa_per_game,x2p_per_game,x2pa_per_game,ft_per_game,fta_per_game,
+                   orb_per_game,drb_per_game,trb_per_game,ast_per_game,stl_per_game,
+                   blk_per_game,tov_per_game,pf_per_game,pts_per_game,age,
+                   g,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,
+                   trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,
+                   usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,num_seasons), as.factor) )
+
+alltime_model <- keras_model_sequential()
+
+alltime_model %>% 
+  # hidden layer
+  layer_dense(units = 20,
+              kernel_initializer = "he_uniform",
+              bias_initializer = "zeros",
+              activation = "relu",
+              input_shape = ncol(x_alltime_training) ) %>% 
+  # output layer
+  layer_dense(units = 1, 
+              kernel_initializer = "glorot_uniform",
+              bias_initializer = "zeros",
+              activation = "sigmoid") %>%
+  # compilation
+  compile(optimizer = optimizer_adam(lr = 0.001),
+          loss = "binary_crossentropy",
+          metrics = c(metric_binary_accuracy) )
+
+
+alltime_model
+
+set.seed(12345) # set seed for reproducibility
+alltime_fit <- alltime_model %>%
+  fit(x = data.matrix(x_alltime_training), y = y_alltime_training, 
+      epochs = 200, batch_size = 64,
+      validation_split = .25)
+
+print(alltime_fit)
+plot(alltime_fit)
+
+alltime_model_predicted_probs  <- predict(object = alltime_model, 
+                                          x = data.matrix(x_alltime_test) ) %>% as.vector() # predicted probabilities 
+#alltime_model_predicted_labels <- x_alltime_test %>% predict(x_alltime_test) %>% k_argmax()
+
+#confusionMatrix(data = as.factor(alltime_model_predicted_labels), reference = as.factor(x_alltime_test), mode = "everything")
+
+set.seed(12345) # set seed for reproducible split
+
+pred_func <- function(object, newdata) {
+  predict(object, x = data.matrix(newdata) ) %>% as.vector()
+}
+
+alltime_model_vip <- vip(object = alltime_model,
+                       method = "permute",
+                       num_features = 10L,
+                       pred_wrapper = pred_func,
+                       train = x_alltime_training,
+                       target = y_alltime_training,
+                       metric = "accuracy",
+                       progress = "text")
+
+print(alltime_model_vip)
+
+pred_func2 <- function(object, newdata) {
+  predict(object, x = data.matrix(newdata) ) %>% as.vector()
+}
+pdp1 <- pdp::partial(alltime_model, train = x_alltime_training, pred.var = c("ws"), pred.fun = pred_func2,
+                     prob = TRUE, progress = plyr::progress_text(style = 3) ) %>% 
+  autoplot(alpha = 0.01)
+pdp2 <- pdp::partial(alltime_model, train = x_alltime_training, pred.var = c("tov"), pred.fun = pred_func2,
+                     prob = TRUE, progress = plyr::progress_text(style = 3) ) %>% 
+  autoplot(alpha = 0.01)
+grid.arrange(pdp1, pdp2, ncol = 2)
+
+pdp3 <- pdp::partial(alltime_model, train = x_alltime_training, pred.var = c("top_75"), pred.fun = pred_func2,
+                     progress = plyr::progress_text(style = 3) ) %>% 
+  autoplot(alpha = 0.01)
+plot(pdp3)
+
+
+```
+#Plot 3
+# The Top 75, my most important categorical dataset, is a list of the best 75 players in history. 
+#Some of the players on this list are active and thus don't quality for HOF
+# But it is consistent that hold top 75 status is a better predictor of HOF likelihood than not holding top historical player status
+#which likely holds redundancy but has some difference
+
+#after running a couple different tine i've found that the order changed slightly but ws and tov remained top five while 
+# while top75 remained the most important categorical facotr
+
+
+
+Naive Baiyes
+```{r}
+############# naive bayes look at data
+
+library(e1071) 
+
+## Import data
+alltime_nb_clean <- alltime_post1979 %>%
+  na.omit()
+#alltime_nb_clean$hof <- as.factor(alltime_nb_clean$hof)
+
+
+str(alltime_nb_clean)
+colnames(alltime_nb_clean) <- make.names(colnames(alltime_nb_clean) )
+set.seed(12345) # 
+
+dt = sort(sample(nrow(alltime_nb_clean), nrow(alltime_nb_clean)*.7))
+alltime_training = alltime_nb_clean[dt,]
+alltime_test = alltime_nb_clean[-dt,]
+
+
+alltime_training <- alltime_training %>% dplyr::select(-player,-seas_id,-season)
+alltime_test <- alltime_test %>% dplyr::select(-player,-seas_id,-season)
+
+
+## Naive Bayes implementation
+
+set.seed(12345) # set seed for reproducibility
+alltime_nbtraining = alltime_training
+alltime_nbtest = alltime_test
+
+alltime_nbtraining <- alltime_nbtraining %>%
+  data.table() %>%
+  one_hot() %>%
+  dplyr::select(fg:pos,age:top_75) %>%
+  mutate(across(!c(fg, fga, x3p, x3pa, x2p, x2pa, ft, fta,orb,drb,trb,ast,stl,
+                   blk,tov,pf,pts,mp_per_game,fg_per_game,fga_per_game,x3p_per_game,
+                   x3pa_per_game,x2p_per_game,x2pa_per_game,ft_per_game,fta_per_game,
+                   orb_per_game,drb_per_game,trb_per_game,ast_per_game,stl_per_game,
+                   blk_per_game,tov_per_game,pf_per_game,pts_per_game,age,
+                   g,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,
+                   trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,
+                   usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,num_seasons), as.factor) )
+
+alltime_nbtest <- alltime_nbtest %>%
+  data.table() %>%
+  one_hot() %>%
+  dplyr::select(fg:pos,age:top_75) %>%
+  mutate(across(!c(fg, fga, x3p, x3pa, x2p, x2pa, ft, fta,orb,drb,trb,ast,stl,
+                   blk,tov,pf,pts,mp_per_game,fg_per_game,fga_per_game,x3p_per_game,
+                   x3pa_per_game,x2p_per_game,x2pa_per_game,ft_per_game,fta_per_game,
+                   orb_per_game,drb_per_game,trb_per_game,ast_per_game,stl_per_game,
+                   blk_per_game,tov_per_game,pf_per_game,pts_per_game,age,
+                   g,per,ts_percent,x3p_ar,f_tr,orb_percent,drb_percent,
+                   trb_percent,ast_percent,stl_percent,blk_percent,tov_percent,
+                   usg_percent,ows,dws,ws,ws_48,obpm,dbpm,bpm,vorp,num_seasons), as.factor) )
+
+alltime_nb_preprocess <- alltime_training %>%
+  preProcess(method = c("center", "scale") )
+
+alltime_training_pre <- predict(alltime_nb_preprocess, alltime_nbtraining)
+alltime_test_pre <- predict(alltime_nb_preprocess, alltime_nbtest)
+
+# create custom model evaluation summary function with numerous accuracy metrics
+binary_evaluation_metrics <- function(data, levels = NULL, model = NULL) {
+  accuracy_kappa <- defaultSummary(data, levels, model) # accuracy, kappa
+  auc_sens_spec <- twoClassSummary(data, levels, model) # AUC (labeled ROC), sensitivity/recall, specificity
+  precision_recall_fscore <- prSummary(data, levels, model) # precision, sensitivity/recall, f-score
+  output <- c(accuracy_kappa, auc_sens_spec, precision_recall_fscore)
+  output
+}
+# implement naive bayes model
+alltime_nb_model = caret::train(dplyr::select(alltime_training_pre, fg:ast_percent), # predictors
+                                alltime_training_pre$hof, # outcome
+                             method = 'nb', # Naive Bayes classification
+                             trControl = trainControl(method = "repeatedcv",
+                                                      number = 10,
+                                                      repeats = 5,
+                                                      verboseIter = TRUE,
+                                                      classProbs = TRUE,
+                                                      summaryFunction = binary_evaluation_metrics),
+                             tuneGrid = expand.grid(adjust = 1,
+                                                    fL = 0,
+                                                    usekernel = FALSE)
+)
+
+alltime_nb_predictions <- predict(alltime_nb_model$finalModel, newdata = alltime_test_pre)
+
+
+model_evaluation_df <- cbind(alltime_test_pre$hof, 
+                             as.data.frame(alltime_nb_predictions$class), 
+                             as.data.frame(alltime_nb_predictions$posterior) ) %>%
+  dplyr::rename(obs = `alltime_test_pre$hof`,
+                pred = `alltime_nb_predictions$class`)
+
+binary_evaluation_metrics(data = model_evaluation_df, 
+                          levels = c("No", "Yes"),
+                          model = alltime_nb_model$finalModel)
+varImp(alltime_nb_model)
+
+ftapergame_range <- range(alltime_test_pre$fta_per_game)
+ft_pergame_range <- range(alltime_test_pre$ft_per_game)
+nb_predict_grid <- expand.grid(fta_per_game = seq(ftapergame_range[1], ftapergame_range[2], length = 100),
+                               ft_per_game = seq(ft_pergame_range[1], ft_pergame_range[2], length = 100),
+                               fg = 0, 
+                               fga = 0,
+                               x3p = 0,
+                               x3pa = 0,
+                               x2p = 0,
+                               x2pa = 0,
+                               ft = 0, 
+                               fta = 0,
+                               orb = 0,
+                               drb = 0,
+                               trb = 0,
+                               ast = 0,
+                               stl = 0,
+                               blk = 0,
+                               tov = 0,
+                               pf = 0,
+                               pts = 0,
+                               mp_per_game = 0,
+                               fg_per_game = 0,
+                               fga_per_game = 0,
+                               x3p_per_game = 0,
+                               x3pa_per_game = 0,
+                               x2p_per_game = 0,
+                               x2pa_per_game = 0,
+                               orb_per_game = 0,
+                               drb_per_game = 0,
+                               trb_per_game = 0,
+                               ast_per_game = 0,
+                               stl_per_game = 0,
+                               blk_per_game = 0,
+                               tov_per_game = 0,
+                               pf_per_game = 0,
+                               pts_per_game = 0,
+                               pos = 0,
+                               age = 0,
+                               tm = 0,
+                               g = 0,
+                               per = 0,
+                               ts_percent = 0,
+                               x3p_ar = 0,
+                               f_tr = 0,
+                               orb_percent = 0,
+                               drb_percent = 0,
+                               trb_percent = 0,
+                               ast_percent = 0
+)
+
+nb_predict_grid$class_prob <- predict(alltime_nb_model, nb_predict_grid, type = "prob")[, 1]
+
+nb_predict_grid <- nb_predict_grid %>%
+  mutate(class_label = ifelse(class_prob > .5, 1, 2) ) %>%
+  mutate(class_label_factor = factor(class_label, labels = c("No", "Yes") ) )
+
+alltime_test_pre$fta_per_game
+
+# plot decision boundary
+
+nb_predict_grid$class_label_factor
+ggplot(data = nb_predict_grid, aes(x = fta_per_game, y = ft_per_game) ) +
+  geom_point(data = nb_predict_grid, aes(color = class_label_factor), shape = 16, size = 0.3) +
+  geom_point(data = alltime_test_pre, aes(x = fta_per_game, y = ft_per_game, color = hof) ) +
+  geom_contour(data = nb_predict_grid, aes(x = fta_per_game, y = ft_per_game, z = class_label), breaks = 1.5, color = "#000000") +
+  labs(x = "ftapergame", y = "ft_pergame", color = "HOF", title = "Naive Bayes") +
+  theme_classic() +
+  theme(axis.title = element_text(face = "bold"),
+        legend.title = element_text(face = "bold"),
+        plot.title = element_text(face = "bold") )
+
+#players that shoot and make approximate 6 free throws again are predicted to be more likely to make the hall of fame.
+#This is consistent because FTA attempts are a functions of player usage. players with higher usage are typically most talented
+#And ft makes correlates with how good one can score
+
+
+```
+
