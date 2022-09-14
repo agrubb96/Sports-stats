@@ -1,5 +1,5 @@
-# _SportsStats_
-This code shows two Machine Learning methods (Neural Network and Naive Bayes) 
+# _Sports Stats_
+"Hoops Akil.rmd" shows two Machine Learning methods (Neural Network and Naive Bayes) 
 applied to NBA stats to understand what predictors best identify a Hall of fame player.
 
 The dataset dates back to 1979, the year in which the three point line was introduced to the NBA and thusly changing basketball forever. 
