@@ -1,4 +1,4 @@
-# Stats
+# _SportsStats_
 This code shows two Machine Learning methods (Neural Network and Naive Bayes) 
 applied to NBA stats to understand what predictors best identify a Hall of fame player.
 
